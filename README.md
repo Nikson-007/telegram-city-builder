@@ -18,5 +18,5 @@
 
 1. **Клонируйте репозиторий:**
    ```bash
-   git clone https://github.com/Nikson-007/telegram-city-builder.git
-cd telegram-city-builder
+   git clone [https://github.com/Nikson-007/telegram-city-builder.git](https://github.com/Nikson-007/telegram-city-builder.git)
+   cd telegram-city-builder
