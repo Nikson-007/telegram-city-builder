@@ -1,5 +1,10 @@
 import datetime
 
+
+
+
+
+
 class Building:
     def __init__(self, name, b_type, income, residents, jobs=0, level=1) -> None:
         self.name = name
@@ -75,12 +80,13 @@ class Street:
         return None
     
 class City:
-    def __init__(self, money, level=1, xp=0, streets: list = None, tax_rate = 10) -> None:
+    def __init__(self, money, level=1, xp=0, streets: list = None, tax_rate = 10, name = None) -> None:
         self.money = money
         self.streets = streets if streets else []
         self.level = level
         self.xp = xp
         self.tax_rate = tax_rate
+        self.name = name
 
     def show_stats(self):
         income = 0

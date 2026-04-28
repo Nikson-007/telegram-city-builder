@@ -10,10 +10,11 @@ from aiogram.types import KeyboardButton, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 import asyncio
 import random
+from aiogram import html
 from classes import Street, City, Building
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from DataBase import init_db, update_user_tax, update_user_stats, update_db_structure, get_user_ui, set_user_ui, get_last_tax_time, update_tax_time, get_user_rank, claim_bonus, get_top_players, upgrade_building_in_db, add_user, get_user_money, add_street, count_streets, get_full_city_data, update_user_money, add_building_to_db
+from DataBase import init_db, update_city_name, update_user_tax, update_user_stats, update_db_structure, get_user_ui, set_user_ui, get_last_tax_time, update_tax_time, get_user_rank, claim_bonus, get_top_players, upgrade_building_in_db, add_user, get_user_money, add_street, count_streets, get_full_city_data, update_user_money, add_building_to_db
 
 class CustomFormatter(logging.Formatter):
     grey = "\x1b[38;20m"
@@ -136,6 +137,10 @@ RARE_EVENTS = [
         "msg": "Инопланетяне закупились сувенирами на космическую сумму!"
     }
 ]
+
+
+
+
 
 class BuildingState(StatesGroup):
     waiting_for_title = State()  # Для названия здания
@@ -374,7 +379,7 @@ async def show_stats(message: types.Message):
     
 
     msg = (
-        f"🏙 *Ваш город*\n"
+        f"🏙 Город: *{city.name}*\n"
         f"---\n"
         f"👤 Мэр *{city.level} уровня *\n"
         f"🔋 {bar} ({city.xp}/{xp_to_next} XP)\n"
@@ -1025,6 +1030,41 @@ async def gain_exp(user_id, amount, message: types.Message):
         await message.answer(msg_text, parse_mode="Markdown")
 
     await update_user_stats(user_id, city.xp, city.level)
+
+
+@dp.message(F.text.startswith('/setname'))
+async def rename_city(message: types.Message):
+    # Очищаем от лишних пробелов и переносов строк
+    new_name = message.text[8:].strip().replace('\n', ' ')
+    
+    if not new_name:
+        await message.answer("❌ Введите название. Пример: `/setname Новоград`", parse_mode="Markdown")
+        return
+
+    if len(new_name) > 20:
+        await message.answer("❌ Слишком длинно! Лимит — 20 символов.")
+        return
+
+    # Запрет на пустые строки или только пробелы
+    if not new_name or new_name.isspace():
+        await message.answer("❌ Название не может быть пустым.")
+        return
+
+    user_id = message.from_user.id
+    city = user_cities.get(user_id)
+
+    if city:
+        city.name = new_name
+        await update_city_name(user_id, new_name)
+        # Безопасный вывод через html.quote, чтобы символы * или _ не ломали Markdown
+        safe_name = html.quote(new_name)
+        await message.answer(f"🏙 Теперь ваш город называется: <b>{safe_name}</b>", parse_mode="HTML")
+    else:
+        await message.answer("Сначала введите /start")
+        
+
+
+
 
 async def main():
     logger.info("Запуск процесса инициализации БД...")

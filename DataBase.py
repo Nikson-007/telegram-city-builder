@@ -1,9 +1,17 @@
 import aiosqlite
 import os
 import datetime
+import random
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, 'city_bot.db')
+
+CITY_PREFIXES = ["Ново", "Старо", "Верхне", "Санкт-", "Нижне", "Зелено"]
+CITY_ROOTS = ["град", "бург", "поль", "горск", "ск", "сити"]
+
+
+random_name = random.choice(CITY_PREFIXES) + random.choice(CITY_ROOTS)
+
 
 print(f"DEBUG: Путь к базе данных: {DB_NAME}")
 
@@ -54,11 +62,10 @@ async def init_db():
 
 async def add_user(user_id, username):
     async with aiosqlite.connect(DB_NAME) as db:
-        await db.execute('''
-            INSERT INTO users (user_id, username) 
-            VALUES (?, ?) 
-            ON CONFLICT(user_id) DO UPDATE SET username = excluded.username
-        ''', (user_id, username))
+        await db.execute(
+            'INSERT OR IGNORE INTO users (user_id, money, city_name) VALUES (?, ?, ?)',
+            (user_id, 1000, random_name)
+        )
         await db.commit()
 
 async def get_user_money(user_id):
@@ -84,12 +91,12 @@ async def count_streets(user_id):
 async def get_full_city_data(user_id):
     async with aiosqlite.connect(DB_NAME) as db:
         # 1. Сначала берем основные данные игрока
-        async with db.execute("SELECT money, level, xp, tax_rate FROM users WHERE user_id = ?", (user_id,)) as cursor:
+        async with db.execute("SELECT money, level, xp, tax_rate, city_name FROM users WHERE user_id = ?", (user_id,)) as cursor:
             user_row = await cursor.fetchone()
             if not user_row:
                 return None
             
-        money, level, xp, tax_rate = user_row
+        money, level, xp, tax_rate, city_name = user_row
 
         # 2. Теперь собираем улицы и здания (тот самый запрос, который простаивал)
         query = """
@@ -127,6 +134,7 @@ async def get_full_city_data(user_id):
 
         return {
             "money": money,
+            "city_name": city_name,
             "level": level,
             "xp": xp,
             "tax_rate": tax_rate,
@@ -235,7 +243,8 @@ async def update_db_structure():
             ("users", "bonus_road_claimed", "INTEGER DEFAULT 0"),
             ("users", "bonus_build_claimed", "INTEGER DEFAULT 0"),
             ("users", "happiness", "INTEGER DEFAULT 50"),
-            ("users", "tax_rate", "INTEGER DEFAULT 13")
+            ("users", "tax_rate", "INTEGER DEFAULT 13"),
+            ("users", "city_name", "TEXT DEFAULT 'Мой город'")
         ]
 
         # 2. Список колонок для таблицы зданий (buildings)
@@ -298,4 +307,9 @@ async def update_user_stats(user_id, xp, level):
 async def update_user_tax(user_id, tax_rate):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("UPDATE users SET tax_rate = ? WHERE user_id = ?", (tax_rate, user_id))
+        await db.commit()
+
+async def update_city_name(user_id, city_name):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET city_name = ? WHERE user_id = ?", (city_name, user_id))
         await db.commit()
