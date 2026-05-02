@@ -2,7 +2,7 @@ import aiosqlite
 import os
 import datetime
 import random
-from classes import Street, Building
+from classes import Street, Building, City
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_NAME = os.path.join(BASE_DIR, 'city_bot.db')
@@ -64,8 +64,8 @@ async def init_db():
 async def add_user(user_id, username):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
-            'INSERT OR IGNORE INTO users (user_id, money, city_name) VALUES (?, ?, ?)',
-            (user_id, 1000, random_name)
+            'INSERT OR IGNORE INTO users (user_id, username, money, city_name) VALUES (?, ?, ?, ?)',
+            (user_id, username, 1000, random_name)
         )
         await db.commit()
 
@@ -89,67 +89,43 @@ async def count_streets(user_id):
             row = await cursor.fetchone()
             return row[0] if row else 0
         
-async def get_full_city_data(user_id):
+async def get_full_city_data(user_id: int):
     async with aiosqlite.connect(DB_NAME) as db:
-        # 1. Получаем основные данные игрока
+        # 1. Данные города
         async with db.execute(
-            "SELECT money, level, xp, tax_rate, city_name FROM users WHERE user_id = ?", 
+            "SELECT money, level, xp, city_name, tax_rate FROM users WHERE user_id = ?", 
             (user_id,)
         ) as cursor:
-            user_row = await cursor.fetchone()
-            if not user_row:
-                return None
-            
-        money, level, xp, tax_rate, city_name = user_row
-
-        # 2. Запрос на улицы и здания (LEFT JOIN гарантирует, что мы увидим даже пустые улицы)
-        query = """
-            SELECT s.street_id, s.name, s.length,
-                   b.name, b.type, b.income, b.residents, b.jobs, b.level, b.slot_index
-            FROM streets s
-            LEFT JOIN buildings b ON s.street_id = b.street_id
-            WHERE s.user_id = ?
-        """
+            city_row = await cursor.fetchone()
         
-        streets_dict = {}
-        async with db.execute(query, (user_id,)) as cursor:
-            async for row in cursor:
-                # Распаковываем строку из БД
-                s_id, s_name, s_len, b_name, b_type, b_inc, b_res, b_jobs, b_lvl, b_slot = row
-                
-                # Создаем объект Street, если его еще нет в словаре.
-                # Используем твой __init__: Street(name, length, db_id)
-                if s_id not in streets_dict:
-                    streets_dict[s_id] = Street(s_name, s_len, s_id)
-                
-                # Если в этой строке есть здание (не None), добавляем его на улицу
-                if b_name is not None:
-                    # Создаем объект. Он сам возьмет b_inc как базу 
-                    # и положит в self._base_income (если ты поправил classes.py)
-                    new_building = Building(
-                        name=b_name,
-                        b_type=b_type,
-                        income=b_inc,
-                        residents=b_res,
-                        jobs=b_jobs if b_jobs else 0
-                    )
-                    
-                    # Просто ставим уровень. Остальное посчитается само!
-                    new_building.level = b_lvl if b_lvl else 1
-                    
-                    streets_dict[s_id].occupy_slot(b_slot, new_building)
+        if not city_row: return None
 
-        # Превращаем словарь в чистый список объектов Street
-        final_streets = list(streets_dict.values())
+        # 2. Улицы
+        async with db.execute(
+            "SELECT street_id, name, length FROM streets WHERE user_id = ?", 
+            (user_id,)
+        ) as cursor:
+            streets_rows = await cursor.fetchall()
 
-        return {
-            "money": money,
-            "level": level,
-            "xp": xp,
-            "streets": final_streets,
-            "tax_rate": tax_rate,
-            "name": city_name
-        }
+        streets = []
+        for s_row in streets_rows:
+            street = Street(name=s_row[1], length=s_row[2], db_id=s_row[0])
+            
+            # 3. Здания для каждой улицы
+            async with db.execute(
+                "SELECT type, name, level, slot_index FROM buildings WHERE street_id = ?", 
+                (s_row[0],)
+            ) as b_cursor:
+                buildings_rows = await b_cursor.fetchall()
+                for b_row in buildings_rows:
+                    building = Building(b_type=b_row[0], custom_name=b_row[1], level=b_row[2])
+                    street.slots[b_row[3]] = building
+            streets.append(street)
+
+        return City(
+            money=city_row[0], level=city_row[1], xp=city_row[2], 
+            name=city_row[3], tax_rate=city_row[4], streets=streets
+        )
     
 async def add_building_to_db(user_id, street_name, name, b_type, income, residents, slot, jobs):
     async with aiosqlite.connect(DB_NAME) as db:
@@ -351,4 +327,17 @@ async def destroy_building_in_bd(street_id, slot_index):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("""DELETE FROM buildings WHERE street_id = ? AND slot_index = ?""", (street_id, slot_index))
 
+        await db.commit()
+
+async def update_balance(user_id, amount):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("UPDATE users SET money = money + ? WHERE user_id = ?", (amount, user_id))
+        await db.commit()
+
+async def update_happiness(user_id, amount):
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "UPDATE users SET happiness = MAX(0, MIN(100, happiness + ?)) WHERE user_id = ?", 
+            (amount, user_id)
+        )
         await db.commit()

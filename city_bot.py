@@ -1,11 +1,15 @@
 import os
 import logging
+import time
+import math
+from aiogram.types import Message
+from events import get_random_event
 from middlewares import LoadCityMiddleware
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, types, F, Router
 from aiogram.filters import Command
-from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder
+from aiogram.utils.keyboard import ReplyKeyboardBuilder, InlineKeyboardBuilder, InlineKeyboardMarkup
 from aiogram.types import KeyboardButton, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 import asyncio
@@ -14,7 +18,8 @@ from aiogram import html
 from classes import Street, City, Building
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from DataBase import init_db, destroy_building_in_bd, save_building_to_db, update_city_name, update_user_tax, update_user_stats, update_db_structure, get_user_ui, set_user_ui, get_last_tax_time, update_tax_time, get_user_rank, claim_bonus, get_top_players, upgrade_building_in_db, add_user, get_user_money, add_street, count_streets, get_full_city_data, update_user_money, add_building_to_db
+from config import BUILDING_CONFIG, GAME_SETTINGS
+from DataBase import init_db, update_balance, update_happiness, destroy_building_in_bd, save_building_to_db, update_city_name, update_user_tax, update_user_stats, update_db_structure, get_user_ui, set_user_ui, get_last_tax_time, update_tax_time, get_user_rank, claim_bonus, get_top_players, upgrade_building_in_db, add_user, get_user_money, add_street, count_streets, get_full_city_data, update_user_money, add_building_to_db
 
 class CustomFormatter(logging.Formatter):
     grey = "\x1b[38;20m"
@@ -62,6 +67,7 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode='Markdown')
 )
 dp = Dispatcher()
+router = Router()
 '''@dp.message()
 async def debug_handler(message: types.Message):
     print(f"Пришло сообщение: {message.text}")
@@ -69,19 +75,6 @@ async def debug_handler(message: types.Message):
     # печатает ли он текст кнопки при нажатии.'''
 user_cities = {}
 user_cities.clear()
-BUILDING_PARAMS = {
-    '🏠 Жилой дом': {'cost': 150, 'income': 15, 'residents': 50, 'jobs': 0, 'min_level': 1},
-    '🛒 Магазин': {'cost': 350, 'income': 70, 'residents': 0, 'jobs': 15, 'min_level': 1},
-    '🏭 Завод': {'cost': 1500, 'income': 200, 'residents': 0, 'jobs': 40, 'min_level': 5}
-}
-
-BUILDING_PARAMS.update({
-    '🌳 Парк': {'cost': 2000, 'income': 0, 'residents': 0, 'jobs': 5, 'min_level': 7, 'desc': 'Снижает расходы на содержание города'},
-    '🚨 Полиция': {'cost': 5000, 'income': -50, 'residents': 0, 'jobs': 20, 'min_level': 10, 'desc': 'Защищает от плохих событий'},
-    '🏥 Больница': {'cost': 4500, 'income': -100, 'residents': 0, 'jobs': 30, 'min_level': 10, 'desc': 'Увеличивает прирост населения'},
-    '👨‍🚒 Пожарные': {'cost': 3500, 'income': -40, 'residents': 0, 'jobs': 15, 'min_level': 10, 'desc': 'Снижает шанс катастроф'},
-    '🏛 Ратуша': {'cost': 10000, 'income': 200, 'residents': 0, 'jobs': 50, 'min_level': 20, 'desc': 'Позволяет собирать больше налогов'}
-})
 
 ADVISOR_PHRASES = {
     "tax": [
@@ -447,77 +440,7 @@ async def start_building_process(message: types.Message):
         reply_markup=streets_build_keyboard(city)
     )
 
-@dp.callback_query(F.data.startswith("build_on_street:"))
-async def select_building_type(callback: types.CallbackQuery):
-    # Достаем ID улицы, чтобы знать, куда потом «втыкнуть» здание
-    street_id = int(callback.data.split(":")[1])
-    
-    # Создаем кнопки с типами зданий
-    builder = InlineKeyboardBuilder()
-    
-    # В callback_data передаем и тип здания, и ID улицы (через разделитель)
-    # Формат: "типо_здания:ID_улицы"
-    builder.row(InlineKeyboardButton(text="🏠 Жилой дом", callback_data=f"construct:house:{street_id}"))
-    builder.row(InlineKeyboardButton(text="🏢 Офис", callback_data=f"construct:office:{street_id}"))
-    builder.row(InlineKeyboardButton(text="🏭 Завод", callback_data=f"construct:factory:{street_id}"))
-    
-    builder.row(InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_main_menu"))
 
-    await callback.message.edit_text(
-        "✨ *Выберите тип здания для постройки:*",
-        reply_markup=builder.as_markup(),
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data.startswith("construct:"))
-async def finalize_construction(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    city = user_cities.get(user_id)
-    
-    # Разбираем данные: construct:тип:street_id
-    _, b_type, street_id = callback.data.split(":")
-    street_id = int(street_id)
-
-    # Ищем улицу
-    street = next((s for s in city.streets if s.db_id == street_id), None)
-    
-    # Простая логика цен и характеристик (потом вынесем в отдельный конфиг)
-    costs = {"house": 1000, "office": 2500, "factory": 5000}
-    
-    if city.money < costs[b_type]:
-        await callback.answer("❌ Недостаточно средств!", show_alert=True)
-        return
-
-    # Проверяем наличие свободного места
-    slot_index = street.get_first_free_slot()
-    if slot_index is None:
-        await callback.answer("🛑 На этой улице нет свободных мест!", show_alert=True)
-        return
-
-    
-    new_building = Building(
-    name=b_type.capitalize(), 
-    type=b_type, 
-    income=100, 
-    residents=10
-    )
-    
-    # 1. Списываем деньги
-    city.money -= costs[b_type]
-    # 2. Добавляем в объект
-    street.occupy_slot(slot_index, new_building)
-    # 3. Сохраняем в БД (нужно будет написать функцию save_building_to_db)
-    await save_building_to_db(user_id, street_id, slot_index, new_building)
-    # 4. Обновляем баланс в БД
-    await update_user_money(user_id, city.money)
-
-    await callback.message.edit_text(
-        f"✅ Здание **{b_type}** успешно построено на улице **{street.name}**!\n"
-        f"Списано: `{costs[b_type]}$`",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
 
 
 @dp.message(F.text == '🗺 Посмотреть город')
@@ -615,6 +538,7 @@ async def back_to_city_menu(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("prepare_delete:"))
 async def delete_building(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
     street_id = int(callback.data.split(":")[1])
     city = user_cities.get(callback.from_user.id)
 
@@ -746,297 +670,110 @@ async def street_selected(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@dp.callback_query(F.data.startswith('upg_build_'))
-async def process_upgrade(callback: types.CallbackQuery):
-    _, _, s_idx, b_idx = callback.data.split('_')
-    s_idx, b_idx = int(s_idx), int(b_idx)
 
-    user_id = callback.from_user.id
-    city = user_cities[user_id]
-    building = city.streets[s_idx].slots[b_idx]
 
-    cost = building.get_upgrade_cost()
 
-    if city.money >= cost:
-        city.money -= cost
-        building.level += 1
+    
 
-        data = await get_full_city_data(user_id=user_id)
+@dp.message(F.text == "💰 Собрать налоги")
+async def collect_taxes_handler(message: Message, city: City):
+    if not city: return
+    
+    user_id = message.from_user.id
+    income = city.calculate_current_income()
+    
+    if income <= 0:
+        await message.answer(random.choice(ADVISOR_PHRASES["zero_profit"]))
+        return
 
-        db_street_id = list(data['streets'].keys())[s_idx]
+    city.money += income
+    await update_user_money(user_id, city.money)
+    
+    xp_gain = GAME_SETTINGS.get('xp_per_collect', 10)
+    await gain_exp(user_id, xp_gain, message)
 
-        await upgrade_building_in_db(db_street_id, b_idx, building.level)
+    await message.answer(
+        f"📊 **Налоги собраны!**\n"
+        f"💵 Доход: `+{income}$`\n"
+        f"😊 Счастье: `{city.calculate_happiness()}%`",
+        parse_mode="Markdown"
+    )
 
-        await callback.answer(f"🚀 Улучшено до уровня {building.level}!")
-        await update_user_money(user_id=user_id, money=city.money)
-
-    else:
-        await callback.answer(f"❌ Недостаточно денег! Нужно {cost}$")
+@dp.callback_query(F.data.startswith("build_on_street:"))
+async def process_build_on_street(callback: types.CallbackQuery, state: FSMContext):
+    street_id = int(callback.data.split(":")[1])
+    # Сохраняем ID улицы и находим первый пустой слот
+    city = user_cities.get(callback.from_user.id)
+    street = next((s for s in city.streets if s.db_id == street_id), None)
+    
+    slot_idx = street.get_first_free_slot()
+    await state.update_data(street_id=street_id, slot_index=slot_idx)
+    
+    await callback.message.edit_text("🏗 Введите название для нового здания:")
+    await state.set_state(BuildingState.waiting_for_title)
+    await callback.answer()
 
 @dp.message(BuildingState.waiting_for_title)
 async def process_building_title(message: types.Message, state: FSMContext):
-    await state.update_data(building_name=message.text)
-    user_id = message.from_user.id
-    city = user_cities.get(user_id)
-
-    builder = ReplyKeyboardBuilder()
+    # Сохраняем введенное название в память FSM
+    await state.update_data(building_title=message.text)
     
-    # Проходим по всем доступным зданиям из конфига
-    for b_type, p in BUILDING_PARAMS.items():
-        # Считаем, сколько таких зданий уже есть у игрока, чтобы показать реальную цену
-        existing_count = sum(
-            1 for street in city.streets 
-            for slot in street.slots 
-            if slot and slot.b_type == b_type
+    # Показываем типы зданий из твоего BUILDING_CONFIG
+    builder = InlineKeyboardBuilder()
+    for b_type, params in BUILDING_CONFIG.items():
+        builder.add(InlineKeyboardButton(
+            text=f"{params['icon']} {b_type} — {params['cost']}$", 
+            callback_data=f"select_b_type:{b_type}")
         )
-        
-        # Актуальная стоимость (та же формула, что и при постройке)
-        current_cost = int(p['cost'] * (1 + 0.2 * existing_count))
-        
-        # Формируем текст для кнопки: Тип + Доход + Цена
-        # Пример: "🏠 Жилой дом (+15$/м) — 150$"
-        btn_text = f"{b_type} (+{p['income']}$/м) — {current_cost}$"
-        
-        # Если уровень игрока слишком мал, добавим замок
-        if city.level < p.get('min_level', 1):
-            btn_text = f"🔒 {b_type} (ур. {p['min_level']})"
-
-        builder.add(KeyboardButton(text=btn_text))
-
-    builder.add(KeyboardButton(text='❌ Отмена'))
+    builder.adjust(1)
     
-    # Адаптируем сетку: по 1 кнопке в ряд, так как текст на них теперь длинный
-    builder.adjust(1) 
-
-    await message.answer(
-        "📊 *Выберите тип здания для постройки:*\n"
-        "_(Цена растет на 20% за каждое такое же здание)_", 
-        reply_markup=builder.as_markup(resize_keyboard=True),
-        parse_mode="Markdown"
-    )
+    await message.answer("Отлично! Теперь выбери тип постройки:", reply_markup=builder.as_markup())
     await state.set_state(BuildingState.waiting_for_type)
+
+
+@dp.callback_query(F.data.startswith("select_b_type:"))
+async def finalize_building(callback: types.CallbackQuery, state: FSMContext):
+    building_type = callback.data.split(":")[1]
+    user_data = await state.get_data()
     
-@dp.message(BuildingState.waiting_for_type)
-async def process_building_type(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    raw_text = message.text
+    street_id = user_data.get("street_id")
+    slot_index = user_data.get("slot_index")
+    title = user_data.get("building_title")
 
-    if raw_text == '❌ Отмена':
-        await state.clear()
-        await message.answer("Строительство отменено.", reply_markup=main_menu_keyboard())
-        return
+    if not title:
+        return await callback.answer("Ошибка: название не найдено. Начните сначала.", show_alert=True)
 
-    # ОПРЕДЕЛЯЕМ ТИП: ищем, какое название из BUILDING_PARAMS содержится в тексте кнопки
-    building_type = None
-    for b_key in BUILDING_PARAMS.keys():
-        if b_key in raw_text:
-            building_type = b_key
-            break
+    city = user_cities.get(callback.from_user.id)
+    config = BUILDING_CONFIG.get(building_type)
 
-    if not building_type:
-        await message.answer("Пожалуйста, используйте кнопки меню.")
-        return
+    if city.money < config['cost']:
+        return await callback.answer(f"Недостаточно средств! Нужно: {config['cost']} 💰", show_alert=True)
 
-    params = BUILDING_PARAMS[building_type]
-    city = user_cities.get(user_id)
-
-    if city.level < params.get('min_level', 1):
-        await message.answer(
-            f"🔒 *Здание заблокировано!*\n"
-            f"Тип '{building_type}' открывается на *{params['min_level']} уровне*.\n"
-            f"Ваш текущий уровень: {city.level}.",
-            parse_mode="Markdown"
-        )
-        return
-
-    existing_count = 0
-    for street in city.streets:
-        for slot in street.slots:
-            if slot and slot.b_type == building_type:
-                existing_count += 1
-
-    current_cost = int(params['cost'] * (1 + 0.2 * existing_count))
-
-    # 3. Проверка кошелька
-    if city.money < current_cost:
-        logger.warning(f"User {user_id} пытался построить {building_type} без денег")
-        await message.answer(
-            f"❌ Цены на стройматериалы выросли!\n"
-            f"Для постройки {existing_count + 1}-го здания типа {building_type} "
-            f"нужно *{current_cost}$*, а у вас {city.money}$.",
-            parse_mode="Markdown"
-        )
-        await state.clear()
-        return
-
-    # 4. Проверка места на улице
-    data = await state.get_data()
-    street_index = data.get("selected_street_index")
-    target_street = city.streets[street_index]
+    # 1. Сначала обновляем локальный объект и списываем деньги
+    city.money -= config['cost']
+    new_building = Building(building_type, title)
     
-    slot = None
-    for i, s in enumerate(target_street.slots):
-        if s is None:
-            slot = i
-            break
+    # 2. Обновляем состояние в памяти (чтобы сразу отобразилось в интерфейсе)
+    street = next((s for s in city.streets if s.db_id == street_id), None)
+    if street:
+        street.slots[slot_index] = new_building
 
-    if slot is None:
-        await message.answer("❌ На этой улице больше нет места для застройки!")
-        await state.clear()
-        return
-    
-    
-    # 5. Создаем здание и пытаемся его "припарковать" на улице
+    # 3. Синхронизируем с БД (важные асинхронные вызовы)[cite: 32, 35]
     try:
-        new_building = Building(
-            name=data.get("building_name"), 
-            b_type=building_type, 
-            income=params['income'], 
-            residents=params['residents'], 
-            jobs=params['jobs'])
-    
-        target_street.occupy_slot(slot, new_building)
-        city.money -= current_cost
-
-        await update_user_money(user_id=user_id, money=city.money)
-        await add_building_to_db(
-            user_id=user_id,
-            street_name=target_street.name,
-            name=new_building.name,
-            b_type=building_type,
-            income=params['income'],
-            residents=params['residents'],
-            slot=slot,
-            jobs=params['jobs']
+        await save_building_to_db(callback.from_user.id, street_id, slot_index, new_building)
+        await update_user_money(callback.from_user.id, city.money)
+        
+        await callback.message.edit_text(
+            f"✅ **{title}** успешно построено!\n"
+            f"Списано: {config['cost']} 💰\n"
+            f"Остаток: {city.money} 💰"
         )
-        if await claim_bonus(user_id, "build"):
-            city.money += 500
-            # Обновляем визуальный баланс в базе, так как мы изменили его в памяти через += 500
-            await update_user_money(user_id, city.money) 
-            await message.answer("🏗 *Грант получен!* Вам начислено 500$ за постройку первого здания!", parse_mode="Markdown")
-
-        logger.info(f"User {user_id} построил {building_type} на улице {target_street.name}")
-        phrase = random.choice(ADVISOR_PHRASES["build"])
-        await message.answer(f"{phrase}\n\n ✅ Готово! *{new_building.name}* радует горожан.", parse_mode="Markdown")
-        await gain_exp(user_id, 50, message)
-    
     except Exception as e:
-        logger.error(f"Ошибка при строительстве: {e}")
-        await notify_admin_error(f"Ошибка стройки у {user_id}: {e}")
-        await message.answer("🏗 Произошел обвал на стройплощадке. Попробуйте позже.")
+        # Если БД упала, стоит хотя бы залогировать ошибку
+        await callback.answer("Произошла ошибка при сохранении данных в БД", show_alert=True)
+        print(f"Ошибка БД: {e}") 
 
     await state.clear()
-    await message.answer("Меню мэра:", reply_markup=main_menu_keyboard())
-
-    
-
-@dp.message(F.text == '💰 Собрать налоги')
-async def collect_money(message: types.Message):
-    user_id = message.from_user.id
-    city = user_cities.get(user_id)
-
-    if not city:
-        await message.answer("Сначала введите /start!")
-        return
-    
-    last_time_str = await get_last_tax_time(user_id=user_id)
-    now = datetime.now()
-    COOLDOWN_MINUTES = 2
-
-    if not last_time_str:
-        await update_tax_time(user_id)
-        await message.answer("Налоговая служба начала работу! Приходите через 2 минуты.")
-        return
-
-    last_time = datetime.fromisoformat(last_time_str)
-    elapsed = now - last_time
-
-    if elapsed < timedelta(minutes=COOLDOWN_MINUTES):
-        remaining = timedelta(minutes=COOLDOWN_MINUTES) - elapsed
-        minutes_left = int(remaining.total_seconds() // 60)
-        seconds_left = int(remaining.total_seconds() % 60)
-
-        await message.answer(f"⏳ Налоговая служба еще обрабатывает прошлые отчеты!\n"
-            f"Приходите через *{minutes_left}м {seconds_left}с*.",
-                parse_mode="Markdown"
-            )
-        return
-    
-    
-
-    try:
-        minutes_passed = elapsed.total_seconds() / 60
-        income_per_minute = city.calculate_current_income()
-
-        # Расчет расходов
-        total_maintenance = sum(b.get_maintenance() for s in city.streets for b in s.slots if b)
-        parks_count = sum(1 for s in city.streets for b in s.slots if b and b.b_type == '🌳 Парк')
-        park_discount = min(parks_count * 0.1, 0.5)
-        total_maintenance = int(total_maintenance * (1 - park_discount))
-
-        real_profit_per_minute = income_per_minute - total_maintenance
-        total_profit = int(real_profit_per_minute * minutes_passed)
-
-        # Отсекаем нулевую прибыль сразу
-        if total_profit <= 0:
-            phrase = random.choice(ADVISOR_PHRASES["zero_profit"])
-            await message.answer(phrase)
-            return
-
-        # Счастье
-        happiness = city.calculate_happiness()
-        happiness_msg = ""
-        if happiness >= 80:
-            total_profit = int(total_profit * 1.2)
-            happiness_msg = "\n🌟 *Бонус за счастье (+20%)*"
-        elif happiness < 30:
-            total_profit = int(total_profit * 0.5)
-            happiness_msg = "\n😡 *Штраф за недовольство (-50%)*"
-
-        # События
-        event_text = ""
-        current_effect = 1.0 # Для логики фраз
-        has_police = any(b.b_type == '🚨 Полиция' for s in city.streets for b in s.slots if b)
-
-        if random.random() < 0.3:
-            event = random.choice(RARE_EVENTS) if random.random() < 0.05 else random.choice(RANDOM_EVENTS)
-            
-            if has_police and event["effect"] < 1.0 and random.random() < 0.6:
-                event_text = "\n\n👮 *Полиция предотвратила убытки!*"
-            else:
-                total_profit = int(total_profit * event["effect"])
-                current_effect = event["effect"] # ТЕПЕРЬ ФРАЗЫ БУДУТ ВЕРНЫМИ
-                event_text = f"\n\n*Событие: {event['name']}*\n_{event['msg']}_"
-
-        # Выбор фразы
-        if event_text and "Полиция" not in event_text:
-            phrase = "😱 Плохие новости, сэр..." if current_effect < 1 else "🌟 Исторический момент!"
-        else:
-            phrase = random.choice(ADVISOR_PHRASES["tax"])
-
-        # Сохранение
-        city.money += total_profit
-        await update_user_money(user_id, city.money)
-        await update_tax_time(user_id)
-
-        await message.answer(
-            f"{phrase}\n\n"
-            f"📈 За {minutes_passed:.1f} мин. заработано: *{total_profit}$*"
-            f"{happiness_msg}"
-            f"{event_text}\n\n"
-            f"💰 Ваш бюджет: *{city.money}$*",
-            parse_mode="Markdown"
-        )
-        
-
-        await gain_exp(user_id, 15, message) # Оставил один раз
-        logger.info(f"User: {user_id} собрал {total_profit}$")
-
-    except Exception as e:
-        error_text = f"Ошибка у юзера {message.from_user.id}: {e}"
-        logger.error(f"Error in collect_money for {user_id}: {e}", exc_info=True)
-        await notify_admin_error(error_message=error_text)
-        await message.answer("❗ Произошла ошибка при обращении к казначейству. Попробуйте позже.")
 
 @dp.callback_query(F.data.startswith("upgrade_street_"))
 async def list_buildings_for_upgrade(callback: types.CallbackQuery):
@@ -1175,7 +912,7 @@ async def gain_exp(user_id, amount, message: types.Message):
 
     if leveled_up:
         unlocked = []
-        for b_name, params in BUILDING_PARAMS.items():
+        for b_name, params in BUILDING_CONFIG.items():
             if params.get('min_level') == city.level:
                 unlocked.append(b_name)
 
@@ -1229,8 +966,8 @@ async def main():
         await update_db_structure()
         logger.info("БД успешно инициализирована, таблицы проверены/созданы.")
         
-        dp.message.outer_middleware(LoadCityMiddleware(user_cities, get_full_city_data))
         dp.callback_query.outer_middleware(LoadCityMiddleware(user_cities, get_full_city_data))
+        dp.message.outer_middleware(LoadCityMiddleware(user_cities, get_full_city_data))
         logger.info("Middleware запущен и полностью исправен.")
     except Exception as e:
         logger.error(f"КРИТИЧЕСКАЯ ОШИБКА при инициализации БД: {e}")

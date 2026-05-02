@@ -1,5 +1,9 @@
 .env
+
 *.db
-__pycache__/
-.DS_Store
 city_bot.log
+
+.DS_Store
+
+__pycache__/
+*.pyc

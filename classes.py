@@ -1,25 +1,31 @@
 import datetime
+from config import BUILDING_CONFIG
 
 
 
 
 
+
+import datetime
+from config import BUILDING_CONFIG
 
 class Building:
-    def __init__(self, name, b_type, income, residents, jobs=0):
-        self.name = name
-        self.type = b_type
+    def __init__(self, b_type: str, custom_name: str = None, level: int = 1):
+        config = BUILDING_CONFIG.get(b_type)
+        if not config:
+            raise ValueError(f"Тип здания {b_type} не найден в конфиге")
+
+        self.type = b_type # Используем это имя везде
+        self.name = custom_name or b_type
+        self.level = level
         
-        # Храним базовые значения в "защищенных" переменных
-        self._base_income = income 
-        self._base_residents = residents
-        self._base_jobs = jobs
-        
-        self.level = 1
+        # Базовые значения из конфига для расчетов
+        self._base_income = config['income']
+        self._base_residents = config['residents']
+        self._base_jobs = config['jobs']
 
     @property
     def income(self):
-        # Используем базу для расчетов
         return int(self._base_income * (self.level**1.2))
 
     @property
@@ -29,15 +35,15 @@ class Building:
     @property
     def jobs(self):
         return int(self._base_jobs * (self.level**1.2))
-    
 
-    
     def get_upgrade_cost(self):
-        return (self.base_income * 20) * self.level
-    
+        base_cost = BUILDING_CONFIG[self.type]['cost']
+        return int(base_cost * 1.5 * self.level)
+
     def get_maintenance(self):
-        base_maintenance = self.income * 0.2
-        return int(base_maintenance * (1 + (self.level - 1) * 0.5))
+        return int((self.income * 0.2) * (1 + (self.level - 1) * 0.5))
+    def upgrade(self):
+        self.level += 1
 
 
 
@@ -51,34 +57,25 @@ class Street:
 
 
     def occupy_slot(self, slot_index, building):
-        # Та самая строка 47, которая выдавала ошибку
         if 0 <= slot_index < len(self.slots):
             self.slots[slot_index] = building
             return True
         return False
 
     def get_street_view(self) -> str:
-        icons = {
-            '🏠 Жилой дом': '🏠',
-            '🏭 Завод': '🏭',
-            '🛒 Магазин': '🛒',
-            '🌳 Парк': '🌳',
-            '🚨 Полиция': '🚨',
-            '🏥 Больница': '🏥',
-            '👨‍🚒 Пожарные': '👨‍🚒',
-            '🏛 Ратуша': '🏛'
-        }
-
+        from config import BUILDING_CONFIG # Импорт внутри, чтобы избежать циклической зависимости
+        
         view = []
         for slot in self.slots:
             if slot is None:
                 view.append("⬜")
             else:
-                icon = icons.get(slot.type, "🏗")
-                # Если уровень > 1, добавляем маленькую цифру (надстрочную)
+                # Берем иконку прямо из конфига по типу здания
+                params = BUILDING_CONFIG.get(slot.type, {})
+                icon = params.get('icon', "🏗")
+                
                 lvl_superscript = {1: "", 2: "²", 3: "³", 4: "⁴", 5: "⁵"}.get(slot.level, f"^{slot.level}")
                 view.append(f"{icon}{lvl_superscript}")
-
         return " ".join(view)
     
     def add_building(self, building_object) -> bool:
@@ -96,7 +93,7 @@ class Street:
         return None
     
 class City:
-    def __init__(self, money, level=1, xp=0, streets: list = None, tax_rate = 10, name = None) -> None:
+    def __init__(self, money, level=1, xp=0, streets: list = None, tax_rate = 13, name = None) -> None:
         self.money = money
         # ВАЖНО: просто сохраняем список, не меняя его тип!
         self.streets = streets if streets is not None else []
@@ -149,23 +146,17 @@ class City:
     
     def calculate_happiness(self):
         base_happiness = 50
-        tax_impact = (13 - self.tax_rate) * 5
-
         factories = 0
         parks = 0
-        hospitals = 0
-        for s in self.streets:
-            for b in s.slots:
-                if b:
-                    if b.type == '🏭 Завод': factories += 1
-                    if b.type == '🌳 Парк': parks += 1
-                    if b.type == '🏥 Больница': hospitals += 1
-
-        happiness = base_happiness + tax_impact + (parks * 10) + (hospitals * 5) - (factories * 10)
-
-        total_res = self.get_total_residents()
-        total_jobs = self.get_total_jobs()
-        if total_res > total_jobs * 1.5:
-            happiness -= 15
-
-        return max(0, min(100, happiness))
+        
+        for street in self.streets:
+            for b in street.slots:
+                if b is None: continue
+                if b.type == '🏭 Завод': # Проверяй именно b.type
+                    factories += 1
+                elif b.type == '🌳 Парк':
+                    parks += 1
+                    
+        # Логика: заводы уменьшают счастье, парки увеличивают
+        total_happiness = base_happiness - (factories * 10) + (parks * 15)
+        return max(0, min(100, total_happiness)) # Ограничение от 0 до 100
