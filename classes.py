@@ -6,25 +6,31 @@ import datetime
 
 
 class Building:
-    def __init__(self, name, b_type, income, residents, jobs=0, level=1) -> None:
+    def __init__(self, name, b_type, income, residents, jobs=0):
         self.name = name
-        self.b_type = b_type
-        self.base_income = income
-        self.base_residents = residents
-        self.base_jobs = jobs
-        self.level = level
+        self.type = b_type
+        
+        # Храним базовые значения в "защищенных" переменных
+        self._base_income = income 
+        self._base_residents = residents
+        self._base_jobs = jobs
+        
+        self.level = 1
 
     @property
     def income(self):
-        return int(self.base_income * (1 + (self.level - 1) * 0.5))
-    
+        # Используем базу для расчетов
+        return int(self._base_income * (self.level**1.2))
+
     @property
     def residents(self):
-        return int(self.base_residents * (self.level**1.1))
-    
+        return int(self._base_residents * (self.level**1.1))
+
     @property
     def jobs(self):
-        return int(self.base_jobs * (self.level**1.2))
+        return int(self._base_jobs * (self.level**1.2))
+    
+
     
     def get_upgrade_cost(self):
         return (self.base_income * 20) * self.level
@@ -38,15 +44,18 @@ class Building:
 class Street:
     def __init__(self, name, length: int, db_id: int = None) -> None:
         self.name = name
-        self.slots = [None for i in range(length)]
+        self.length = length
         self.db_id = db_id
+        self.buildings = []
+        self.slots = [None] * length
 
 
-    def occupy_slot(self, slot_index, building_object):
+    def occupy_slot(self, slot_index, building):
+        # Та самая строка 47, которая выдавала ошибку
         if 0 <= slot_index < len(self.slots):
-            self.slots[slot_index] = building_object
-        else:
-            return False
+            self.slots[slot_index] = building
+            return True
+        return False
 
     def get_street_view(self) -> str:
         icons = {
@@ -65,7 +74,7 @@ class Street:
             if slot is None:
                 view.append("⬜")
             else:
-                icon = icons.get(slot.b_type, "🏗")
+                icon = icons.get(slot.type, "🏗")
                 # Если уровень > 1, добавляем маленькую цифру (надстрочную)
                 lvl_superscript = {1: "", 2: "²", 3: "³", 4: "⁴", 5: "⁵"}.get(slot.level, f"^{slot.level}")
                 view.append(f"{icon}{lvl_superscript}")
@@ -79,10 +88,18 @@ class Street:
                 return i
         return None
     
+    # В классе Street
+    def get_first_free_slot(self):
+        for i, slot in enumerate(self.slots):
+            if slot is None:
+                return i
+        return None
+    
 class City:
     def __init__(self, money, level=1, xp=0, streets: list = None, tax_rate = 10, name = None) -> None:
         self.money = money
-        self.streets = streets if streets else []
+        # ВАЖНО: просто сохраняем список, не меняя его тип!
+        self.streets = streets if streets is not None else []
         self.level = level
         self.xp = xp
         self.tax_rate = tax_rate
@@ -140,9 +157,9 @@ class City:
         for s in self.streets:
             for b in s.slots:
                 if b:
-                    if b.b_type == '🏭 Завод': factories += 1
-                    if b.b_type == '🌳 Парк': parks += 1
-                    if b.b_type == '🏥 Больница': hospitals += 1
+                    if b.type == '🏭 Завод': factories += 1
+                    if b.type == '🌳 Парк': parks += 1
+                    if b.type == '🏥 Больница': hospitals += 1
 
         happiness = base_happiness + tax_impact + (parks * 10) + (hospitals * 5) - (factories * 10)
 

@@ -14,7 +14,7 @@ from aiogram import html
 from classes import Street, City, Building
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
-from DataBase import init_db, update_city_name, update_user_tax, update_user_stats, update_db_structure, get_user_ui, set_user_ui, get_last_tax_time, update_tax_time, get_user_rank, claim_bonus, get_top_players, upgrade_building_in_db, add_user, get_user_money, add_street, count_streets, get_full_city_data, update_user_money, add_building_to_db
+from DataBase import init_db, destroy_building_in_bd, save_building_to_db, update_city_name, update_user_tax, update_user_stats, update_db_structure, get_user_ui, set_user_ui, get_last_tax_time, update_tax_time, get_user_rank, claim_bonus, get_top_players, upgrade_building_in_db, add_user, get_user_money, add_street, count_streets, get_full_city_data, update_user_money, add_building_to_db
 
 class CustomFormatter(logging.Formatter):
     grey = "\x1b[38;20m"
@@ -62,7 +62,13 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode='Markdown')
 )
 dp = Dispatcher()
+'''@dp.message()
+async def debug_handler(message: types.Message):
+    print(f"Пришло сообщение: {message.text}")
+    # Не удаляй этот хэндлер пока не проверишь, 
+    # печатает ли он текст кнопки при нажатии.'''
 user_cities = {}
+user_cities.clear()
 BUILDING_PARAMS = {
     '🏠 Жилой дом': {'cost': 150, 'income': 15, 'residents': 50, 'jobs': 0, 'min_level': 1},
     '🛒 Магазин': {'cost': 350, 'income': 70, 'residents': 0, 'jobs': 15, 'min_level': 1},
@@ -150,6 +156,9 @@ class RoadCreation(StatesGroup):
     waiting_for_name = State()   # Для названия улицы
     waiting_for_length = State() # Для длины улицы
 
+class CityStates(StatesGroup):
+    waiting_for_city_name = State()
+
 
 def main_menu_keyboard():
     builder = ReplyKeyboardBuilder()
@@ -161,18 +170,39 @@ def main_menu_keyboard():
     builder.add(KeyboardButton(text='🔝 Улучшить здание'))
     builder.add(KeyboardButton(text='🏆 Топ игроков'))
     builder.add(KeyboardButton(text='⚙️ Настройки'))
+    builder.add(KeyboardButton(text="✏️ Изменить название города"))
     builder.adjust(2)
     return builder.as_markup(resize_keyboard = True)
 
-def streets_inline_keyboard(city: City):
+def streets_inline_keyboard(city):
     builder = InlineKeyboardBuilder()
+    
+    for street in city.streets:
+        # Проверяем: если это кортеж, достаем имя по индексу
+        if isinstance(street, tuple):
+            # Предположим, что в кортеже имя — это второй элемент (индекс 1)
+            # А ID — первый элемент (индекс 0)
+            s_name = street[1] 
+            s_id = street[0]
+        else:
+            # Если это объект класса Street
+            s_name = street.name
+            s_id = street.db_id
 
-    for index, street in enumerate(city.streets):
-        # Текст на кнопке — название улицы
-        # callback_data — это то, что бот "услышит", когда нажмут кнопку
+        builder.button(
+            text=f"🛣 {s_name}", 
+            callback_data=f"view_street:{s_id}"
+        )
+    
+    builder.adjust(1)
+    return builder.as_markup()
+
+def streets_build_keyboard(city: City):
+    builder = InlineKeyboardBuilder()
+    for street in city.streets:
         builder.add(InlineKeyboardButton(
-            text=f"🛣 {street.name}", 
-            callback_data=f"select_street_{index}")
+            text=f"🏗 {street.name}", 
+            callback_data=f"build_on_street:{street.db_id}")
         )
     builder.adjust(1)
     return builder.as_markup()
@@ -414,58 +444,211 @@ async def start_building_process(message: types.Message):
     
     await message.answer(
         "На какой улице будем строить?",
-        reply_markup=streets_inline_keyboard(city)
+        reply_markup=streets_build_keyboard(city)
     )
+
+@dp.callback_query(F.data.startswith("build_on_street:"))
+async def select_building_type(callback: types.CallbackQuery):
+    # Достаем ID улицы, чтобы знать, куда потом «втыкнуть» здание
+    street_id = int(callback.data.split(":")[1])
+    
+    # Создаем кнопки с типами зданий
+    builder = InlineKeyboardBuilder()
+    
+    # В callback_data передаем и тип здания, и ID улицы (через разделитель)
+    # Формат: "типо_здания:ID_улицы"
+    builder.row(InlineKeyboardButton(text="🏠 Жилой дом", callback_data=f"construct:house:{street_id}"))
+    builder.row(InlineKeyboardButton(text="🏢 Офис", callback_data=f"construct:office:{street_id}"))
+    builder.row(InlineKeyboardButton(text="🏭 Завод", callback_data=f"construct:factory:{street_id}"))
+    
+    builder.row(InlineKeyboardButton(text="⬅️ Отмена", callback_data="back_to_main_menu"))
+
+    await callback.message.edit_text(
+        "✨ *Выберите тип здания для постройки:*",
+        reply_markup=builder.as_markup(),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("construct:"))
+async def finalize_construction(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    city = user_cities.get(user_id)
+    
+    # Разбираем данные: construct:тип:street_id
+    _, b_type, street_id = callback.data.split(":")
+    street_id = int(street_id)
+
+    # Ищем улицу
+    street = next((s for s in city.streets if s.db_id == street_id), None)
+    
+    # Простая логика цен и характеристик (потом вынесем в отдельный конфиг)
+    costs = {"house": 1000, "office": 2500, "factory": 5000}
+    
+    if city.money < costs[b_type]:
+        await callback.answer("❌ Недостаточно средств!", show_alert=True)
+        return
+
+    # Проверяем наличие свободного места
+    slot_index = street.get_first_free_slot()
+    if slot_index is None:
+        await callback.answer("🛑 На этой улице нет свободных мест!", show_alert=True)
+        return
+
+    
+    new_building = Building(
+    name=b_type.capitalize(), 
+    type=b_type, 
+    income=100, 
+    residents=10
+    )
+    
+    # 1. Списываем деньги
+    city.money -= costs[b_type]
+    # 2. Добавляем в объект
+    street.occupy_slot(slot_index, new_building)
+    # 3. Сохраняем в БД (нужно будет написать функцию save_building_to_db)
+    await save_building_to_db(user_id, street_id, slot_index, new_building)
+    # 4. Обновляем баланс в БД
+    await update_user_money(user_id, city.money)
+
+    await callback.message.edit_text(
+        f"✅ Здание **{b_type}** успешно построено на улице **{street.name}**!\n"
+        f"Списано: `{costs[b_type]}$`",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
 
 @dp.message(F.text == '🗺 Посмотреть город')
 async def view_city(message: types.Message):
     user_id = message.from_user.id
-    city = user_cities.get(user_id)
-
-    if not city or not city.streets:
-        await message.answer(
-            "🏙 *Ваш город пуст!*\n\n"
-            "Похоже, вы еще не построили ни одной улицы. Воспользуйтесь кнопкой «🛣 Новая улица», чтобы начать.",
-            parse_mode="Markdown"
-        )
-        return
     
-    response = ["🏙 *Карта вашего города*\n"]
+    # Изменяем имя переменной с city_data на city
+    city = user_cities.get(user_id)
+    
+    if not city:
+        await message.answer("🏙 *Ваш город пуст!*", parse_mode="Markdown")
+        return
+
+    # Теперь 'city' существует и код ниже будет работать
+    news_banner = ""
+    if random.random() < 0.20:
+        events = [
+            {"text": "🍎 Фермерский рынок! +500$", "money": 500, "emoji": "🎉"},
+            {"text": "🚧 Ремонт трубы. -300$", "money": -300, "emoji": "🛠"}
+        ]
+        event = random.choice(events)
+        city.money += event["money"]
+        await update_user_money(user_id, city.money)
+        news_banner = f"📢 *НОВОСТИ:* {event['emoji']} {event['text']}\n━━━━━━━━━━━━━━\n"
 
     header = (
-        f"🏘 *ПАНОРАМА ГОРОДА*\n"
+        f"🏘 *ПАНОРАМА ГОРОДА: {city.name}*\n" # Теперь ошибка NameError исчезнет
         f"━━━━━━━━━━━━━━\n"
-        f"📍 Уровнь мэра: `{city.level}`\n"
+        f"{news_banner}"
+        f"📍 Уровень мэра: `{city.level}`\n"
         f"😊 Счастье: `{city.calculate_happiness()}%` | 💰 Налог: `{city.tax_rate}%` \n"
         f"━━━━━━━━━━━━━━\n\n"
     )
 
-    street_reports = []
+    await message.answer(
+        header, 
+        reply_markup=streets_inline_keyboard(city),
+        parse_mode="Markdown"
+    )
 
-    for street in city.streets:
-        # Считаем показатели конкретной улицы
-        build_count = sum(1 for b in street.slots if b)
-        s_res = sum(b.residents for b in street.slots if b)
-        s_jobs = sum(b.jobs for b in street.slots if b)
-        
-        # Визуальный ряд эмодзи
-        view = street.get_street_view()
-        
-        # Формируем блок улицы
-        report = (
-            f"🛣 *Улица: {street.name}*\n"
-            f"└ {view}\n"
-            f"📊 `Зданий: {build_count}/{len(street.slots)} | 👥 {s_res} | 🛠 {s_jobs}`"
-        )
-        street_reports.append(report)
 
-    final_message = header + "\n\n".join(street_reports)
+@dp.callback_query(F.data.startswith("view_street:"))
+async def handle_view_street(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    city = user_cities.get(user_id)
+    
+    # Получаем ID из callback_data
+    street_id = int(callback.data.split(":")[1])
+    
+    # Находим нужную улицу по её ID
+    street = next((s for s in city.streets if s.db_id == street_id), None)
+    
+    if not street:
+        await callback.answer("Улица не найдена!", show_alert=True)
+        return
 
-    if len(final_message) > 4000:
-        for x in range(0, len(final_message), 4000):
-            await message.answer(final_message[x:x+4000], parse_mode="Markdown")
-    else:
-        await message.answer(final_message, parse_mode="Markdown")
+    # Формируем текст конкретной улицы
+    view = street.get_street_view()
+    report = (
+        f"🛣 *Улица: {street.name}*\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"{view}\n\n"
+        f"👥 Жителей: `{sum(b.residents for b in street.slots if b)}`"
+    )
+
+    # Кнопка назад
+    kb = InlineKeyboardBuilder()
+    kb.add(InlineKeyboardButton(text="⬅️ Назад", callback_data="back_to_main_menu"))
+    kb.add(InlineKeyboardButton(text="🔨Снести здание", callback_data=f"prepare_delete:{street_id}"))
+
+    # edit_text вместо answer, чтобы сообщение обновилось!
+    await callback.message.edit_text(report, reply_markup=kb.as_markup(), parse_mode="Markdown")
+    await callback.answer() # Убирает "часики" с кнопки
+
+@dp.callback_query(F.data == "back_to_main_menu")
+async def back_to_city_menu(callback: types.CallbackQuery):
+    # Просто вызываем заново функцию отображения города, но через edit_text
+    user_id = callback.from_user.id
+    city = user_cities.get(user_id)
+    
+    header = (
+        f"🏘 *ПАНОРАМА ГОРОДА: {city.name}*\n" # Добавили имя города!
+        f"━━━━━━━━━━━━━━\n"
+        f"📍 Уровень мэра: `{city.level}`\n"
+        f"😊 Счастье: `{city.calculate_happiness()}%` | 💰 Налог: `{city.tax_rate}%` \n"
+        f"━━━━━━━━━━━━━━\n\n"
+    )
+    
+    await callback.message.edit_text(
+        header, 
+        reply_markup=streets_inline_keyboard(city), 
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("prepare_delete:"))
+async def delete_building(callback: types.CallbackQuery):
+    street_id = int(callback.data.split(":")[1])
+    city = user_cities.get(callback.from_user.id)
+
+    street = next((s for s in city.streets if s.db_id == street_id), None)
+
+    if not street:
+        await callback.answer("Улица не найдена!", show_alert=True)
+        return
+    
+    occupied_slots = [i for i, b in enumerate(street.slots) if b is not None]
+
+    if not occupied_slots:
+        await callback.answer("На этой улице нет зданий для сноса!", show_alert=True)
+        return
+    
+    index = max(occupied_slots)
+    await destroy_building_in_bd(street_id, index)
+    street.slots[index] = None
+
+    city.xp = max(0, city.xp - 50) # Наказание за снос здания
+    await update_user_stats(user_id=callback.from_user.id, xp=city.xp, level=city.level)
+
+    message_text = (
+        f"🏗 Здание на улице *{street.name}* успешно снесено!\n"
+        f"📉 Штраф за снов: `-50 XP` (Текущий опыт: `{city.xp}`)"
+    )
+
+    await callback.message.edit_text(
+        text=message_text,
+        reply_markup=streets_inline_keyboard(city),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+    
 
 @dp.message(F.text == '🛣 Новая улица')
 async def start_road_creation(message: types.Message, state: FSMContext):
@@ -562,28 +745,6 @@ async def street_selected(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.answer()
 
-@dp.callback_query(F.data.startswith('upgrade_street_'))
-async def show_buildings_for_update(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    street_index = int(callback.data.split('_')[2])
-    city = user_cities[callback.from_user.id]
-    street = city.streets[street_index]
-
-    user_layout = await get_user_ui(user_id)
-
-    builder = InlineKeyboardBuilder()
-    for idx, b in enumerate(street.slots):
-        if b:
-            # Если 2 в ряд — сокращаем текст, если 1 — пишем подробно
-            btn_text = f"{b.b_type} (Lvl. {b.level})" if user_layout == 2 else f"{b.b_type} {b.name} (Lvl. {b.level})"
-            
-            builder.add(InlineKeyboardButton(
-                text=btn_text, 
-                callback_data=f"upg_build_{street_index}_{idx}")
-            )
-
-    builder.adjust(user_layout)
-    await callback.message.edit_text("Какое здание улучшим?", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith('upg_build_'))
 async def process_upgrade(callback: types.CallbackQuery):
@@ -1032,35 +1193,30 @@ async def gain_exp(user_id, amount, message: types.Message):
     await update_user_stats(user_id, city.xp, city.level)
 
 
-@dp.message(F.text.startswith('/setname'))
-async def rename_city(message: types.Message):
-    # Очищаем от лишних пробелов и переносов строк
-    new_name = message.text[8:].strip().replace('\n', ' ')
-    
-    if not new_name:
-        await message.answer("❌ Введите название. Пример: `/setname Новоград`", parse_mode="Markdown")
-        return
+# 1. Срабатывает при нажатии на кнопку
+# Исправленный кусок (строка 750+)
+@dp.message(F.text == "✏️ Изменить название города")
+async def rename_city_call(message: types.Message, state: FSMContext):
+    await message.answer("📝 Введите новое название для вашего города:")
+    await state.set_state(CityStates.waiting_for_city_name)
 
-    if len(new_name) > 20:
-        await message.answer("❌ Слишком длинно! Лимит — 20 символов.")
-        return
-
-    # Запрет на пустые строки или только пробелы
-    if not new_name or new_name.isspace():
-        await message.answer("❌ Название не может быть пустым.")
-        return
-
+# 2. Ловит текстовое сообщение с новым названием
+@dp.message(CityStates.waiting_for_city_name)
+async def rename_city_finish(message: types.Message, state: FSMContext):
+    new_name = message.text
     user_id = message.from_user.id
     city = user_cities.get(user_id)
 
     if city:
         city.name = new_name
-        await update_city_name(user_id, new_name)
-        # Безопасный вывод через html.quote, чтобы символы * или _ не ломали Markdown
-        safe_name = html.quote(new_name)
-        await message.answer(f"🏙 Теперь ваш город называется: <b>{safe_name}</b>", parse_mode="HTML")
+        # ОБЯЗАТЕЛЬНО добавь это, чтобы в БД сохранилось:
+        await update_city_name(user_id, new_name) 
+        
+        await message.answer(f"✅ Город успешно переименован в **{new_name}**!", parse_mode="Markdown")
     else:
-        await message.answer("Сначала введите /start")
+        await message.answer("❌ Ошибка: Город не найден.")
+    
+    await state.clear()
         
 
 
